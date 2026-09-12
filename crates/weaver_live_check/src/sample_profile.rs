@@ -4,13 +4,17 @@
 
 use std::rc::Rc;
 
+use cel::{Context, SerializationError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    live_checker::LiveChecker, matcher::SampleMatch, sample_attribute::SampleAttribute, Advisable,
-    Error, LiveCheckResult, LiveCheckRunner, LiveCheckStatistics, Sample,
-    SampleInstrumentationScope, SampleRef, SampleResource,
+    cel::{attribute_map, bind_signal_context, Matchable},
+    live_checker::LiveChecker,
+    matcher::SampleMatch,
+    sample_attribute::SampleAttribute,
+    Advisable, Error, LiveCheckResult, LiveCheckRunner, LiveCheckStatistics, Sample,
+    SampleInstrumentationScope, SampleRef, SampleResource, SampleType,
 };
 
 /// Represents a profile collected via OTLP (v1development)
@@ -68,6 +72,21 @@ impl LiveCheckRunner for SampleProfile {
         stats.maybe_add_live_check_result(self.live_check_result.as_ref());
         self.attributes
             .run_live_check(live_checker, stats, Some(sample_match), parent_signal)
+    }
+}
+
+impl Matchable for SampleProfile {
+    fn sample_type(&self) -> SampleType {
+        SampleType::Profile
+    }
+
+    fn bind(&self, context: &mut Context<'_>) -> Result<(), SerializationError> {
+        context.add_variable("attributes", attribute_map(self.attributes.iter()))?;
+        bind_signal_context(
+            self.resource.as_deref(),
+            self.instrumentation_scope.as_deref(),
+            context,
+        )
     }
 }
 
@@ -164,5 +183,14 @@ when = 'true'
         let result = profile.run_live_check(&mut live_checker, &mut stats, None, &parent);
         assert!(result.is_ok());
         assert!(profile.live_check_result.is_some());
+    }
+
+    #[test]
+    fn a_profile_binds_its_attributes() {
+        let mut profile = make_profile();
+        profile.attributes =
+            vec![SampleAttribute::try_from("myapp.profile.kind=cpu").expect("it parses")];
+        let when = r#"attributes["myapp.profile.kind"] == "cpu" && resource == null"#;
+        assert!(crate::cel::evaluate(when, &profile).expect("it evaluates"));
     }
 }

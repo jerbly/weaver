@@ -1,6 +1,0 @@
-{
-  "attributes": [
-    { "name": "service.name", "value": "vendor.gateway" }
-  ],
-  "live_check_result": null
-}

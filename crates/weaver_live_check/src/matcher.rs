@@ -16,7 +16,7 @@ use crate::{
         type_advisor::{check_attributes, CheckableAttribute},
         FindingBuilder,
     },
-    cel::{execute, Matchable},
+    cel::{execute, stdlib_context, Matchable},
     generated::attributes::FindingId,
     live_checker::LiveChecker,
     sample_attribute::SampleAttribute,
@@ -178,7 +178,7 @@ impl Matchers {
             return sample_match;
         }
         sample_match.targeted = true;
-        let mut context = Context::default();
+        let mut context = stdlib_context();
         if let Err(error) = sample.bind(&mut context) {
             sample_match.errors = targeted
                 .map(|(index, _)| (index, error.to_string()))

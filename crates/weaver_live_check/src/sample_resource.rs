@@ -4,12 +4,17 @@
 
 use std::rc::Rc;
 
+use cel::{Context, SerializationError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    live_checker::LiveChecker, matcher::SampleMatch, sample_attribute::SampleAttribute, Advisable,
-    Error, LiveCheckResult, LiveCheckRunner, LiveCheckStatistics, Sample, SampleRef,
+    cel::{attribute_map, Matchable},
+    live_checker::LiveChecker,
+    matcher::SampleMatch,
+    sample_attribute::SampleAttribute,
+    Advisable, Error, LiveCheckResult, LiveCheckRunner, LiveCheckStatistics, Sample, SampleRef,
+    SampleType,
 };
 
 /// Represents a resource
@@ -59,5 +64,32 @@ impl LiveCheckRunner for SampleResource {
         stats.maybe_add_live_check_result(self.live_check_result.as_ref());
         self.attributes
             .run_live_check(live_checker, stats, Some(sample_match), parent_signal)
+    }
+}
+
+impl Matchable for SampleResource {
+    fn sample_type(&self) -> SampleType {
+        SampleType::Resource
+    }
+
+    fn bind(&self, context: &mut Context<'_>) -> Result<(), SerializationError> {
+        context.add_variable("attributes", attribute_map(self.attributes.iter()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cel::evaluate;
+
+    #[test]
+    fn a_resource_binds_its_attributes() {
+        let resource: SampleResource = serde_json::from_str(include_str!(
+            "../fixtures/cel/resource/resource-myapp-checkout.json"
+        ))
+        .expect("the fixture parses");
+        let when = r#"attributes["service.name"] == "myapp.checkout"
+            && attributes["service.version"] == "1.4.0""#;
+        assert!(evaluate(when, &resource).expect("it evaluates"));
     }
 }

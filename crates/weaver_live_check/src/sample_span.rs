@@ -4,15 +4,21 @@
 
 use std::rc::Rc;
 
+use cel::{Context, SerializationError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use weaver_semconv::v1::group::SpanKindSpec;
 
 use crate::{
-    advice::add_entity_association_findings, live_checker::LiveChecker, matcher::SampleMatch,
-    sample_attribute::SampleAttribute, sample_instrumentation_scope::SampleInstrumentationScope,
-    sample_resource::SampleResource, Advisable, Error, LiveCheckResult, LiveCheckRunner,
-    LiveCheckStatistics, Sample, SampleRef,
+    advice::add_entity_association_findings,
+    cel::{attribute_map, bind_signal_context, Matchable},
+    live_checker::LiveChecker,
+    matcher::SampleMatch,
+    sample_attribute::SampleAttribute,
+    sample_instrumentation_scope::SampleInstrumentationScope,
+    sample_resource::SampleResource,
+    Advisable, Error, LiveCheckResult, LiveCheckRunner, LiveCheckStatistics, Sample, SampleRef,
+    SampleType,
 };
 
 /// The status code of the span
@@ -277,5 +283,115 @@ impl LiveCheckRunner for SampleSpanLink {
         stats.maybe_add_live_check_result(self.live_check_result.as_ref());
         self.attributes
             .run_live_check(live_checker, stats, Some(sample_match), parent_signal)
+    }
+}
+
+impl Matchable for SampleSpan {
+    fn sample_type(&self) -> SampleType {
+        SampleType::Span
+    }
+
+    fn bind(&self, context: &mut Context<'_>) -> Result<(), SerializationError> {
+        context.add_variable("name", &self.name)?;
+        context.add_variable("kind", &self.kind)?;
+        // OTLP treats a missing status as unset.
+        context.add_variable("status", self.status.clone().unwrap_or_default())?;
+        context.add_variable("attributes", attribute_map(self.attributes.iter()))?;
+        bind_signal_context(
+            self.resource.as_deref(),
+            self.instrumentation_scope.as_deref(),
+            context,
+        )
+    }
+}
+
+impl Matchable for SampleSpanEvent {
+    fn sample_type(&self) -> SampleType {
+        SampleType::SpanEvent
+    }
+
+    fn bind(&self, context: &mut Context<'_>) -> Result<(), SerializationError> {
+        context.add_variable("name", &self.name)?;
+        context.add_variable("attributes", attribute_map(self.attributes.iter()))?;
+        bind_signal_context(
+            self.resource.as_deref(),
+            self.instrumentation_scope.as_deref(),
+            context,
+        )
+    }
+}
+
+impl Matchable for SampleSpanLink {
+    fn sample_type(&self) -> SampleType {
+        SampleType::SpanLink
+    }
+
+    fn bind(&self, context: &mut Context<'_>) -> Result<(), SerializationError> {
+        context.add_variable("attributes", attribute_map(self.attributes.iter()))?;
+        bind_signal_context(
+            self.resource.as_deref(),
+            self.instrumentation_scope.as_deref(),
+            context,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cel::evaluate;
+
+    fn parse<T: serde::de::DeserializeOwned>(json: &str) -> T {
+        serde_json::from_str(json).expect("the fixture parses")
+    }
+
+    #[test]
+    fn a_span_binds_its_name_kind_status_and_attributes() {
+        let span: SampleSpan = parse(include_str!("../fixtures/cel/span-status/span-error.json"));
+        let when = r#"name == "checkout payment" && kind == "internal"
+            && status.code == "error" && status.message.contains("declined")
+            && attributes["error.type"] == "card_declined""#;
+        assert!(evaluate(when, &span).expect("it evaluates"));
+    }
+
+    #[test]
+    fn a_span_with_no_status_is_unset() {
+        let span: SampleSpan = parse(include_str!(
+            "../fixtures/cel/span-status/span-no-status.json"
+        ));
+        let when = r#"status.code == "unset" && status.message == """#;
+        assert!(evaluate(when, &span).expect("it evaluates"));
+    }
+
+    #[test]
+    fn a_span_event_binds_its_name_and_attributes() {
+        let event = SampleSpanEvent {
+            name: "exception".to_owned(),
+            attributes: vec![
+                SampleAttribute::try_from("exception.type=Timeout").expect("it parses")
+            ],
+            live_check_result: None,
+            timestamp: None,
+            resource: None,
+            instrumentation_scope: None,
+        };
+        let when = r#"name == "exception" && attributes["exception.type"] == "Timeout""#;
+        assert!(evaluate(when, &event).expect("it evaluates"));
+    }
+
+    #[test]
+    fn a_span_link_binds_its_attributes() {
+        let link = SampleSpanLink {
+            attributes: vec![
+                SampleAttribute::try_from("myapp.link.kind=parent").expect("it parses")
+            ],
+            live_check_result: None,
+            trace_id: None,
+            span_id: None,
+            resource: None,
+            instrumentation_scope: None,
+        };
+        let when = r#"attributes["myapp.link.kind"] == "parent""#;
+        assert!(evaluate(when, &link).expect("it evaluates"));
     }
 }

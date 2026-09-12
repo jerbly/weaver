@@ -4,6 +4,7 @@
 
 use std::rc::Rc;
 
+use cel::{Context, SerializationError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,13 +13,14 @@ use weaver_semconv::v1::group::InstrumentSpec;
 
 use crate::{
     advice::{add_entity_association_findings, FindingBuilder},
+    cel::{bind_signal_context, AttributeMap, Matchable},
     live_checker::LiveChecker,
     matcher::SampleMatch,
     sample_attribute::SampleAttribute,
     sample_instrumentation_scope::SampleInstrumentationScope,
     sample_resource::SampleResource,
     Advisable, Error, FindingId, LiveCheckResult, LiveCheckRunner, LiveCheckStatistics, Sample,
-    SampleRef, VersionedSignal,
+    SampleRef, SampleType, VersionedSignal,
 };
 
 /// Represents the instrument type of a metric
@@ -447,5 +449,100 @@ impl LiveCheckRunner for SampleMetric {
         stats.maybe_add_live_check_result(self.live_check_result.as_ref());
         stats.add_metric_name_to_coverage(coverage_name);
         Ok(())
+    }
+}
+
+impl Matchable for SampleMetric {
+    fn sample_type(&self) -> SampleType {
+        SampleType::Metric
+    }
+
+    fn bind(&self, context: &mut Context<'_>) -> Result<(), SerializationError> {
+        context.add_variable("name", &self.name)?;
+        context.add_variable("unit", &self.unit)?;
+        context.add_variable("instrument", &self.instrument)?;
+        context.add_variable("attributes", self.agreed_attributes())?;
+        bind_signal_context(
+            self.resource.as_deref(),
+            self.instrumentation_scope.as_deref(),
+            context,
+        )
+    }
+}
+
+impl SampleMetric {
+    /// The attributes that have the same value on every data point. A key
+    /// whose value differs between points is not included.
+    fn agreed_attributes(&self) -> AttributeMap<'_> {
+        let attributes: Box<dyn Iterator<Item = &SampleAttribute>> = match &self.data_points {
+            Some(DataPoints::Number(points)) => {
+                Box::new(points.iter().flat_map(|point| point.attributes.iter()))
+            }
+            Some(DataPoints::Histogram(points)) => {
+                Box::new(points.iter().flat_map(|point| point.attributes.iter()))
+            }
+            Some(DataPoints::ExponentialHistogram(points)) => {
+                Box::new(points.iter().flat_map(|point| point.attributes.iter()))
+            }
+            None => Box::new(std::iter::empty()),
+        };
+        let mut agreed = AttributeMap::new();
+        let mut disputed = Vec::new();
+        for attribute in attributes {
+            if let Some(held) = agreed.insert(attribute.name.as_str(), &attribute.value) {
+                if *held != attribute.value {
+                    disputed.push(attribute.name.as_str());
+                }
+            }
+        }
+        for name in disputed {
+            let _ = agreed.remove(name);
+        }
+        agreed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cel::evaluate;
+
+    fn parse(json: &str) -> SampleMetric {
+        serde_json::from_str(json).expect("the fixture parses")
+    }
+
+    /// The attributes are the data points together.
+    #[test]
+    fn a_metric_binds_its_name_unit_instrument_and_attributes() {
+        let metric = parse(include_str!(
+            "../fixtures/cel/metric-common/metric-myapp-checkout-duration.json"
+        ));
+        let when = r#"name == "myapp.checkout.duration" && unit == "s" && instrument == "histogram"
+            && attributes["myapp.checkout.stage"] == "payment"
+            && attributes["myapp.tenant.code"] == "acme-eu""#;
+        assert!(evaluate(when, &metric).expect("it evaluates"));
+    }
+
+    #[test]
+    fn a_key_the_data_points_disagree_on_is_left_out() {
+        let metric = parse(
+            r#"{
+              "name": "myapp.checkout.duration",
+              "instrument": "histogram",
+              "unit": "s",
+              "data_points": [
+                { "attributes": [{ "name": "myapp.checkout.stage", "value": "payment" },
+                                 { "name": "myapp.tenant.code", "value": "acme-eu" }],
+                  "value": 0.42 },
+                { "attributes": [{ "name": "myapp.checkout.stage", "value": "cart" },
+                                 { "name": "myapp.tenant.code", "value": "acme-eu" }],
+                  "value": 1.13 }
+              ],
+              "live_check_result": null
+            }"#,
+        );
+        let when = r#"attributes["myapp.tenant.code"] == "acme-eu"
+            && !("myapp.checkout.stage" in attributes)"#;
+        assert!(evaluate(when, &metric).expect("it evaluates"));
     }
 }

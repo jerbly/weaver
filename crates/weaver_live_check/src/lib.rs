@@ -44,7 +44,7 @@ pub(crate) fn enum_name<T: Serialize>(value: &T) -> String {
 
 /// Advisors for live checks
 pub mod advice;
-/// Binds sample fields to CEL variables.
+/// Runs CEL expressions against samples.
 pub mod cel;
 /// Finding modifier engine (overrides and filters).
 pub mod finding_modifier;
