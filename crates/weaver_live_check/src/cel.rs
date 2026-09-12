@@ -2,8 +2,8 @@
 
 //! Runs CEL expressions against live-check samples.
 //!
-//! Each sample type implements [`Matchable`] in its own module. It adds its
-//! variables to a [`Context`] with the serde support of the `cel` crate. So a
+//! Each sample type implements `Matchable` in its own module. It adds its
+//! variables to a `Context` with the serde support of the `cel` crate. So a
 //! field keeps its serde form: an enum is its variant name, and an `Option`
 //! is the value or `null`.
 
